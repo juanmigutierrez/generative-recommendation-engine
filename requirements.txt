@@ -1,0 +1,23 @@
+# Core
+numpy
+pandas
+scipy
+scikit-learn
+
+# Data
+datasets          # Hugging Face, for Amazon Reviews 2023
+pyarrow
+
+# Modeling
+implicit           # fast ALS/BPR collaborative filtering baseline
+jax                # RQ-VAE (Step 5) -- see docs/05_semantic_ids.md for why JAX, not torch
+jaxlib
+
+# Eval / utils
+tqdm
+matplotlib
+
+# Serving
+fastapi
+uvicorn[standard]
+pydantic
