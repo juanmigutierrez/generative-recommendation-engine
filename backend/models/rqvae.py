@@ -47,6 +47,53 @@ def init_params(key, in_dim, hidden_dim, latent_dim, n_codebooks, codebook_size)
     return params
 
 
+def kmeans_init_codebooks(key, encoder_outputs, n_codebooks, codebook_size, n_iters=15):
+    """Data-dependent codebook initialization via a few rounds of k-means, run level-by-level
+    on the residual stream (same structure as residual_quantize itself).
+
+    Why this exists: random-near-origin codebook init (the original init_params behavior)
+    works fine when the encoder's output distribution happens to already be near the origin
+    and reasonably spread out -- true for the TF-IDF/SVD embeddings this was first built for.
+    It silently fails for embeddings from a real pretrained model like Sentence-T5, whose
+    outputs are known to be anisotropic (cluster tightly in a narrow cone of space, a
+    well-documented property of BERT-family sentence embeddings) and live at a different
+    scale than a small-random-noise codebook init assumes. The result, observed directly
+    when retraining on real embeddings: total codebook collapse -- every item mapped to the
+    exact same code, because the codebook never started anywhere near the encoder's actual
+    output region. Seeding each codebook from the real (randomly-initialized-encoder) output
+    distribution via k-means fixes this at the source, before training even starts.
+    """
+    codebooks = []
+    residual = encoder_outputs
+    keys = jax.random.split(key, n_codebooks)
+    for l in range(n_codebooks):
+        n_points = residual.shape[0]
+        init_idx = jax.random.choice(keys[l], n_points, shape=(codebook_size,), replace=False)
+        centers = residual[init_idx]
+        for _ in range(n_iters):
+            dists = (
+                jnp.sum(residual**2, axis=-1, keepdims=True)
+                - 2 * residual @ centers.T
+                + jnp.sum(centers**2, axis=-1)[None, :]
+            )
+            assign = jnp.argmin(dists, axis=-1)
+            onehot = jax.nn.one_hot(assign, codebook_size)
+            counts = jnp.sum(onehot, axis=0)
+            sums = onehot.T @ residual
+            # codes with zero points assigned this round keep their previous position
+            # rather than collapsing to a zero vector
+            centers = jnp.where(counts[:, None] > 0, sums / jnp.maximum(counts, 1)[:, None], centers)
+        codebooks.append(centers)
+        dists = (
+            jnp.sum(residual**2, axis=-1, keepdims=True)
+            - 2 * residual @ centers.T
+            + jnp.sum(centers**2, axis=-1)[None, :]
+        )
+        idx = jnp.argmin(dists, axis=-1)
+        residual = residual - centers[idx]
+    return jnp.stack(codebooks, axis=0)
+
+
 def encode(params, x):
     h = jax.nn.relu(x @ params["enc_w1"] + params["enc_b1"])
     z = h @ params["enc_w2"] + params["enc_b2"]

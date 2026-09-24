@@ -2,10 +2,10 @@
 
 ## Why this step exists
 
-Both baselines (`docs/03_baselines.md`... see the results table in Step 4 / the blog draft)
-share one blind spot: they only know an item or user exists if it showed up during training.
-Popularity ranks by interaction count; ALS learns a vector per user/item from the
-interaction matrix. Neither can say anything about a user or item they've never seen.
+Both baselines (see the results table in Step 4 / the blog draft) share one blind spot: they
+only know an item or user exists if it showed up during training. Popularity ranks by
+interaction count; ALS learns a vector per user/item from the interaction matrix. Neither can
+say anything about a user or item they've never seen.
 
 Measured cost of that blind spot (`docs/02_split_and_eval.md`): **18–28% of val/test users
 are cold-start**, and ALS falls back to popularity for all of them.
@@ -21,70 +21,105 @@ a language model generates word tokens.
 This is the mechanism from TIGER (Google DeepMind, NeurIPS 2023, ["Recommender Systems with
 Generative Retrieval"](https://arxiv.org/abs/2305.05065)).
 
-## A framework detour worth documenting honestly
+## Framework choices, and why they ended up split across two machines
 
-The original plan (`docs/00_roadmap.md`) called for `sentence-transformers` embeddings and a
-PyTorch RQ-VAE. Neither worked in this sandbox:
+The RQ-VAE itself (`backend/models/rqvae.py`) is JAX, and stays JAX. PyTorch's CPU-only build
+is only published on `download.pytorch.org`, which this project's sandbox can't reach, and the
+default PyPI `torch` wheel pulls in several GB of CUDA dependencies that don't fit the
+sandbox's disk quota — confirmed by actually trying, not assumed. JAX's CPU wheel is
+self-contained on PyPI (~90 MB). The Adam optimizer (`rqvae.make_adam`) is hand-written rather
+than pulled from `optax`, partly to avoid one more dependency, partly because writing it out
+is a better forcing function for actually understanding what Adam does than importing it.
 
-- `sentence-transformers` requires PyTorch.
-- PyTorch's CPU-only build is only published on `download.pytorch.org`, which the sandbox's
-  network allowlist doesn't include.
-- The default PyPI `torch` wheel pulls in several GB of CUDA dependencies (`cuda-toolkit`,
-  `nvidia-cublas-*`, etc.) that don't fit the sandbox's disk quota — confirmed by actually
-  trying: downloading the 526 MB torch wheel alone worked, but resolving its CUDA
-  dependencies did not.
+Item *embeddings* (the RQ-VAE's input) are a different story, and went through several
+iterations worth documenting honestly:
 
-Two substitutions, both deliberate rather than incidental:
+1. First attempt, in-sandbox: TF-IDF + TruncatedSVD (LSA) over item titles, no PyTorch needed
+   at all. Worked, and nearest-neighbor checks looked reasonable, but it's word-overlap
+   signal, not real semantic understanding — "PS4" and "PlayStation 4" are unrelated to it
+   unless those exact strings co-occur enough for SVD to link them.
+2. Second attempt: load `sentence-t5-base` (the actual model family TIGER's paper uses) into
+   JAX/Flax, run locally. Blocked — `transformers` v5 (2025) removed Flax/TensorFlow support
+   from the library entirely, confirmed directly in HuggingFace's own migration guide
+   (`https://github.com/huggingface/transformers/blob/main/MIGRATION_GUIDE_V5.md`, "Removal of
+   TensorFlow and Jax"). Pinning an old `transformers` version just for this one script wasn't
+   worth it.
+3. Final: `sentence-t5-base` via the standard `sentence-transformers` library (PyTorch), run
+   locally, then moved to Google Colab (free GPU) once local CPU inference turned out to be
+   slow for a 110M-parameter model over 25,612 items. Real semantic embeddings, produced on
+   whichever machine could actually run them efficiently, fed back into the sandbox where the
+   RQ-VAE (still JAX) consumes them.
 
-1. **Item embeddings: TF-IDF + TruncatedSVD (LSA)** instead of a sentence-transformer.
-   Classic, well-understood, needs nothing beyond scikit-learn. For short e-commerce titles
-   ("Skylanders: Spyro's Adventure - Xbox 360"), word-overlap signal is most of what a
-   sentence embedding buys you anyway — confirmed by checking nearest neighbors before
-   trusting it as RQ-VAE input (see below). Swapping in a real sentence-transformer later is
-   a one-file change; nothing downstream cares how the input vector was produced.
-2. **RQ-VAE: JAX** instead of PyTorch. JAX's CPU wheel is self-contained on PyPI (~90 MB, no
-   proxy needed). The Adam optimizer is hand-written (`backend/models/rqvae.py`,
-   `make_adam()`) rather than pulled from `optax`, partly to avoid one more dependency, partly
-   because writing it out is a better forcing function for actually understanding what Adam
-   does than importing it.
-
-This is the same kind of story as the dataset saga in Step 2 — worth stating plainly rather
-than glossing over, because "here's the constraint, here's the substitution, here's why it's
-still a legitimate choice" is a more credible engineering narrative than pretending everything
-went as originally planned.
+The split — PyTorch for embedding a pretrained model, JAX for the from-scratch RQ-VAE — isn't
+arbitrary. It's "use the tool each sub-task actually supports," which is a more honest
+engineering story than forcing one framework everywhere for consistency's sake.
 
 ## Building the item content embeddings
 
-`backend/scripts/build_item_embeddings.py`:
-
-1. TF-IDF over item titles (unigrams + bigrams, 20K vocab, English stopwords removed).
-2. TruncatedSVD down to 128 dimensions (~22% explained variance — expected for LSA over a
-   large, sparse vocabulary; the goal isn't reconstructing the text, just capturing enough
-   structure that similar titles land near each other).
-3. L2-normalize.
+`backend/scripts/build_item_embeddings_local.py`, run on Colab (see
+`notebooks/colab_item_embeddings.ipynb`): `sentence-transformers/sentence-t5-base`
+(~110M-parameter encoder, 768-dim output), mean-pooled per the model's own method, L2-normalized.
 
 Sanity check before trusting this as RQ-VAE input — nearest neighbors by cosine similarity:
 
 ```
-'Jeecoo V20 Stereo Gaming Headset for PS4 PS5 Xbox One...' nearest neighbors:
-  0.968  ARKARTECH Gaming Headset with Mic for Xbox One PS4 PS5 PC Switch Tablet...
-  0.964  Gaming Headset with Mic for Xbox One PS4 PS5 PC Switch Tablet Smartphone...
-  0.956  Combatwing Pc Gaming Headset with Microphone & Led Light...
-
 'Gunstar Heroes - Sega Genesis' nearest neighbors:
-  0.931  RoboCop vs. Terminator - Sega Genesis
-  0.923  Cyborg Justice - Sega Genesis
-  0.920  Mystic Defender - Sega Genesis
+  0.935  Starflight - Sega Genesis
+  0.930  Gunstar Super Heroes
+  0.926  Gaiares - Sega Genesis
+  0.925  Phantasy Star II - Sega Genesis
+  0.918  Phantasy Star IV - Sega Genesis
+
+'Nintendo Splatoon Series - Octoling Amiibo 3-pack - Switch' nearest neighbors:
+  0.935  amiibo - Octoling (Blue) - Splatoon Series
+  0.924  Nintendo Switch – OLED Model Splatoon 3 Special Edition
+  0.921  amiibo - Inkling (Yellow) - Splatoon Series
+  0.916  Nintendo Amiibo - Squirtle - Super Smash Bros. Series - Switch
 ```
 
-Good enough — gaming headsets cluster with gaming headsets, Genesis-era games cluster with
-Genesis-era games.
+Noticeably better than the TF-IDF version — "Phantasy Star II/IV" showing up for Gunstar
+Heroes is a same-era, same-publisher, similar-genre association a pure word-overlap method
+would never make, since the titles share almost no words.
+
+## Anisotropy: a hidden landmine in pretrained sentence embeddings
+
+The first attempt to train the RQ-VAE on these real embeddings failed completely — not a
+crash, worse: it silently converged to a **totally collapsed codebook**. Every single one of
+25,612 items mapped to the exact same 3-digit code. Loss looked great (flat and low) right up
+until checking what the codes actually were.
+
+Root cause, measured directly rather than guessed at: the average cosine similarity between
+two *random, unrelated* items was **0.76**. In a well-spread embedding space, unrelated items
+should sit close to orthogonal (~0 similarity). BERT-family sentence embeddings are known to
+be anisotropic — nearly all of a vector's magnitude sits in one direction shared by every
+item, a well-documented phenomenon in NLP literature (see the "BERT-flow" / "whitening-BERT"
+line of work). That shared direction is exactly what a small encoder collapses onto: reconstructing
+the *average* embedding minimizes loss almost as well as actually differentiating items,
+so with no counter-pressure, that's the lazy solution gradient descent finds.
+
+Two fixes, both standard and both necessary together — data-dependent codebook init alone
+only partially helped (level 1 usage went from 1 code to 4 out of 256 — better, still broken):
+
+1. **Standardize the input.** Center (subtract the mean vector) and scale to unit variance
+   per dimension before the encoder ever sees the embeddings. This directly attacks the shared
+   dominant direction. Measured effect: average random-pair cosine similarity dropped from
+   0.76 to ~0.0005 after standardizing.
+2. **Data-dependent codebook initialization.** Instead of small-random-noise codebook init
+   (fine for the TF-IDF embeddings, which happened to already sit near the origin at a
+   compatible scale), run the freshly-initialized encoder once over the real data and seed
+   each codebook via k-means on those outputs (`rqvae.kmeans_init_codebooks`), level-by-level
+   on the residual stream. This guarantees the codebook starts in the actual region of space
+   the encoder produces, rather than hoping training finds it.
+
+This is a real, worth-remembering lesson for anyone doing this with a real pretrained
+embedding model rather than a hand-built one: **don't feed raw sentence-embedding-model output
+straight into a from-scratch encoder without checking its geometry first.**
 
 ## The RQ-VAE
 
 `backend/models/rqvae.py`. Three pieces:
 
-**Encoder / decoder** — a small MLP on each side (128 → 256 → 32 latent, mirrored back out).
+**Encoder / decoder** — a small MLP on each side (768 → 256 → 32 latent, mirrored back out).
 Nothing unusual: this is what makes it a *variational auto*encoder-style architecture —
 compress, then reconstruct, and the quality of the reconstruction is the training signal.
 
@@ -109,58 +144,54 @@ picked, so the encoder doesn't keep wandering to a new point every step.
 
 ## Training
 
-400 epochs, batch size 1024, Adam (lr 2e-3), full 25,612-item catalog. Loss (reconstruction +
-codebook + 0.25·commitment) drops from 0.023 to 0.0039 and plateaus:
+400 epochs, batch size 1024, Adam (lr 2e-3), full 25,612-item catalog, on the standardized
+embeddings with k-means-initialized codebooks. Loss (reconstruction + codebook +
+0.25·commitment) drops from ~3.4 to ~1.03 and plateaus:
 
 ![RQ-VAE training curve](../data/processed/rqvae_training_curve.png)
 
-Codebook utilization — how many of the 256 codes per level actually get used, rather than
-collapsing onto a handful of them (a known VQ-VAE failure mode):
+Codebook utilization — how many of the 256 codes per level actually get used:
 
 | level | codes used |
 |---|---|
-| 1 | 244 / 256 (95%) |
-| 2 | 245 / 256 (96%) |
-| 3 | 247 / 256 (96%) |
+| 1 | 73 / 256 (29%) |
+| 2 | 247 / 256 (96%) |
+| 3 | 246 / 256 (96%) |
 
-Healthy — no collapse.
+An honest, real result worth stating plainly rather than rounding up: levels 2 and 3 are
+healthy, level 1 is lower than the TF-IDF version's run got (95%). No sign of collapse (73
+active codes, still climbing when training stopped, vs. 1), but level 1 apparently has fewer
+natural "coarse" clusters in real semantic space than the codebook has room for — plausible,
+since level 1 has to capture the broadest category distinctions first, before levels 2 and 3
+refine within them. This would be worth revisiting with more training epochs or a smaller
+level-1 codebook if this were going into production.
 
 ## Assigning Semantic IDs
 
-Every item's raw 3-level code (from `residual_quantize`) is a tuple like `(66, 89, 120)`.
-25,612 items only produced **16,446 unique 3-level tuples** — 48.2% of items share a tuple
-with at least one other item. Expected: 256<sup>3</sup> possible combinations is much larger
-than 25,612 items, but codes aren't used uniformly (some regions of embedding space are
-denser than others), so collisions happen well before the theoretical ceiling.
+Every item's raw 3-level code (from `residual_quantize`) is a tuple like `(62, 215, 102)`.
+25,612 items produced **21,713 unique 3-level tuples** — 25.3% of items share a tuple with at
+least one other item (down from 48.2% with the TF-IDF embeddings — real semantic embeddings
+differentiate items better, so fewer collide before the theoretical 256<sup>3</sup> ceiling).
 
 TIGER's fix, applied here: append a 4th digit — a running counter, per colliding tuple — so
 every item's *full* Semantic ID (4 digits) is unique, even though the first 3 (content-derived)
 digits can repeat between related items. After adding it: **all 25,612 Semantic IDs are
 unique**, verified directly rather than assumed.
 
-One actual collision, for concreteness — items 7 and 8 share `(79, 81, 86)`, disambiguated as
-`(79, 81, 86, 0)` and `(79, 81, 86, 1)`:
-
-- *Bulletstorm: Limited Edition*
-- *Borderlands 2 Limited Edition Strategy Guide*
-
-Makes sense: short titles, both dominated by "Limited Edition" in the TF-IDF signal, so they
-land in the same neighborhood.
-
 ## Qualitative check: do the codes actually mean something?
 
-Five items sharing the same level-1 code (`66, ...`):
+Five items sharing the same level-1 code (`62, ...`):
 
-- *Tekken - PlayStation*
-- *Crash Bandicoot 3: Warped - PlayStation*
-- *Syphon Filter - PlayStation*
-- *R4: Ridge Racer Type 4 - PlayStation PS1*
-- *Oddworld Abe's Oddysee - PlayStation*
+- *Saitek Eclipse Keyboard (PZ30AU)*
+- *DSI Left Handed Mechanical Keyboard Cherry MX Red KB-DCK-LH104-V2*
+- *Creative Labs Fatal1ty 1010 Gaming Mouse*
+- *Saitek Eclipse Backlit Keyboard - Red LED (PZ30AUR)*
+- *Ideazon MERC Gaming Keyboard*
 
-All five are original PlayStation (PS1) titles — the model wasn't told "cluster by console
-generation," it learned that grouping purely from title text and reconstruction pressure.
-This is the whole point made concrete: a Semantic ID is not an arbitrary bucket, it's a
-learned, content-derived neighborhood.
+All five are gaming keyboards/mice — a tighter, more precise cluster than the TF-IDF version's
+"PlayStation console generation" grouping, and again, the model wasn't told to group by
+peripheral type. It learned that purely from title content and reconstruction pressure on real
+semantic embeddings.
 
 ## What's next
 
@@ -171,8 +202,10 @@ search, the architectural bet TIGER and Meta's HSTU both make.
 
 ## Outputs
 
-- `data/processed/item_embeddings.npy`, `item_embeddings_index.parquet` — 128-dim TF-IDF/SVD
-  content embeddings.
+- `data/processed/item_embeddings.npy`, `item_embeddings_index.parquet` — 768-dim
+  `sentence-t5-base` content embeddings (generated on Colab GPU).
+- `data/processed/rqvae_embedding_standardization.npz` — mean/std used to standardize
+  embeddings before the encoder; needed to embed any new item consistently later.
 - `data/processed/semantic_ids.parquet` — `item_id` → 4-digit Semantic ID (3 content codes +
   1 dedup digit).
 - `data/processed/rqvae_params.npz` — trained encoder/decoder/codebook weights.

@@ -11,3 +11,4 @@ frontend/dist/
 frontend/build/
 .env
 .DS_Store
+.tmp.driveupload/

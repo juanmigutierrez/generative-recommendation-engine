@@ -108,7 +108,11 @@ these IDs like a language model generates tokens); why "residual" quantization (
 codebooks applied in sequence, each correcting the previous one's error) gives finer-grained
 codes than a single codebook could.
 
-## Step 6 — Generative sequential retrieval model
+## Step 6 — Generative sequential retrieval model — done
+
+Built and documented in full in `docs/06_generative_retrieval.md`. Short version below;
+that file has the tokenization scheme, the timing constraint that shaped the context-length
+choice, the honest mixed val/test result, and a worked example.
 
 **Build:** a decoder-only Transformer (GPT-style, causal attention) trained on each user's
 history as a sequence of Semantic IDs, predicting the next item's Semantic ID
@@ -127,12 +131,16 @@ items (not just any token sequence corresponds to a real product); how this comp
 two-tower embedding search and what each approach trades off (index-build cost vs. inference
 cost, ease of adding new items, etc.).
 
-## Step 7 — Ranking / reranking stage
+## Step 7 — Ranking / reranking stage — done
 
-**Build:** a second-stage model that takes the ~100 candidates the retrieval stage produced
-for a user and reorders them, using features the retrieval stage couldn't afford to use for
-every item in the catalog (price, recency, popularity, collaborative-filtering score,
-content similarity).
+Built and documented in full in `docs/07_ranking.md`. Short version below; that file has
+the feature table, the LambdaMART training details, the honest val-vs-test result, and a
+worked example.
+
+**Build:** a LightGBM LambdaMART ranker (`LGBMRanker`, `objective="lambdarank"`) that takes
+the ~100 candidates ALS retrieval produced for a user and reorders them, using features
+retrieval couldn't afford to use for every item in the catalog (price with imputation,
+recency, popularity, content similarity from the Step 5 embeddings, retrieval's own score).
 
 **Why:** this is the second half of the two-stage pattern. Retrieval optimizes for coverage
 and speed over the whole catalog; ranking optimizes for precision over a small candidate
@@ -140,19 +148,39 @@ set, where it's affordable to compute richer features per item.
 
 **Concepts to be able to explain:** why you wouldn't just run the ranking model over the
 entire catalog directly (compute cost at scale); feature engineering for ranking (what
-signals were available and why they were chosen); this is also where the missing-price data
-gap (`docs/01_dataset.md`) gets handled explicitly, a good concrete example of a real data
--quality decision.
+signals were available and why they were chosen, including how the missing-price data gap
+from `docs/01_dataset.md` got handled -- global-median imputation plus a `has_price` flag,
+since no clean category taxonomy existed for the originally-planned category-median
+approach); why reranking has to be evaluated on the *same* candidate set, reordered or not,
+to isolate what the ranking stage itself contributes versus what retrieval already did;
+learning-to-rank (LambdaMART/`lambdarank`) versus plain binary classification for this kind
+of problem.
 
-## Step 8 — Offline evaluation framework
+## Step 8 — Offline evaluation framework — done
 
-**Build:** one script that runs Recall@K, NDCG@K, and MAP@K for every model tier
-(popularity → ALS → retrieval-only → retrieval+ranking) against the same val/test sets, and
-outputs a single comparison table.
+Built and documented in full in `docs/08_evaluation.md`. Short version below; that file has
+the full results table, the cold-start fallback rule applied consistently across every
+tier, and an honest read of why no single tier wins everything.
+
+**Build:** one script (`backend/scripts/run_full_evaluation.py`) that runs Recall@K,
+NDCG@K, and MAP@K for every model tier (popularity → ALS → Semantic ID Transformer →
+ALS + ranking) against the same 2,000-user sample per split, and outputs a single
+comparison table.
 
 **Why:** this produces the actual "results" evidence for both the interview story and the
 blog post — a table showing each stage's measured contribution, not just "trust me, the
-fancy model is better."
+fancy model is better." It also closes a gap Steps 6 and 7 each flagged honestly at the
+time: their own evaluations excluded cold-start users (no train history → no beam-search
+context, no ALS candidates), while Step 4's baseline table included them via a popularity
+fallback. Step 8 applies that same fallback to every tier, so the whole table is finally
+apples-to-apples.
+
+**Concepts to be able to explain:** why "evaluate every model the same way" is itself a
+nontrivial design decision, not a formality — three earlier scripts each made reasonable,
+individually-documented scope choices that turned out not to be comparable to each other;
+MAP@K vs. NDCG@K (both reward early hits, but MAP rewards *several* early hits compounding,
+NDCG discounts more smoothly by rank); why "no tier wins every metric on every split" is a
+real, defensible finding for a multi-mechanism system rather than an unfinished result.
 
 ## Step 9 — FastAPI serving layer
 

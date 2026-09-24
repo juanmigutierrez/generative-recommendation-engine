@@ -39,9 +39,26 @@ def main():
     n_items, in_dim = embeddings.shape
     print(f"{n_items:,} items, {in_dim}-dim content embeddings")
 
-    x = jnp.array(embeddings)
+    # Standardize (center + per-dimension unit std) before the encoder ever sees this data.
+    # Necessary for real pretrained sentence embeddings (Sentence-T5, BERT-family in general):
+    # they're anisotropic -- nearly all of the vector's magnitude sits in one direction shared
+    # by every item (measured directly: random-pair cosine similarity was 0.76 on the raw
+    # embeddings here, essentially indistinguishable, vs. ~0 after standardizing). Skipping
+    # this step is what caused a total codebook collapse (every item mapped to the same code)
+    # the first time this was trained on real embeddings -- see docs/05_semantic_ids.md.
+    emb_mean = embeddings.mean(axis=0, keepdims=True)
+    emb_std = embeddings.std(axis=0, keepdims=True)
+    embeddings_std = ((embeddings - emb_mean) / (emb_std + 1e-8)).astype("float32")
+
+    x = jnp.array(embeddings_std)
     key = jax.random.PRNGKey(SEED)
-    params = rqvae.init_params(key, in_dim, HIDDEN_DIM, LATENT_DIM, N_CODEBOOKS, CODEBOOK_SIZE)
+    init_key, codebook_key = jax.random.split(key)
+    params = rqvae.init_params(init_key, in_dim, HIDDEN_DIM, LATENT_DIM, N_CODEBOOKS, CODEBOOK_SIZE)
+
+    # Data-dependent codebook init (k-means on the freshly-initialized encoder's own outputs)
+    # instead of small-random-noise init -- see rqvae.kmeans_init_codebooks for why.
+    z0 = rqvae.encode(params, x)
+    params["codebooks"] = rqvae.kmeans_init_codebooks(codebook_key, z0, N_CODEBOOKS, CODEBOOK_SIZE)
 
     opt_init, opt_update = rqvae.make_adam(lr=LR)
     opt_state = opt_init(params)
@@ -114,6 +131,13 @@ def main():
         codebooks=np.array(params["codebooks"]),
     )
 
+    # standardization stats, needed to apply the same transform to any new item embedded later
+    np.savez(
+        os.path.join(PROCESSED_DIR, "rqvae_embedding_standardization.npz"),
+        mean=emb_mean,
+        std=emb_std,
+    )
+
     metrics = {
         "n_items": n_items,
         "in_dim": in_dim,
@@ -126,6 +150,8 @@ def main():
         "n_unique_3digit_codes": n_unique_codes,
         "pct_items_colliding_before_dedup": 100 * n_colliding_items / n_items,
         "codebook_utilization": utilization,
+        "embedding_source": "sentence-transformers/sentence-t5-base (via Colab GPU, see build_item_embeddings_local.py)",
+        "input_standardized": True,
     }
     with open(os.path.join(PROCESSED_DIR, "rqvae_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)

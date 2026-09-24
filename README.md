@@ -65,3 +65,16 @@ value of each added stage of complexity is measurable, not assumed.
 
 Build in progress — see task list. Each stage is built, explained, and evaluated before
 moving to the next.
+
+
+## Tutorial notebooks (run each section on Colab)
+
+| section | notebook |
+|---|---|
+| Data, split, popularity & ALS baselines, metrics | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/juanmigutierrez/generative-recommendation-engine/blob/main/notebooks/tutorial_01_data_and_baselines.ipynb) |
+| Semantic IDs (Sentence-T5 + RQ-VAE) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/juanmigutierrez/generative-recommendation-engine/blob/main/notebooks/tutorial_02_semantic_ids.ipynb) |
+| Generative retrieval (Transformer + constrained beam search) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/juanmigutierrez/generative-recommendation-engine/blob/main/notebooks/tutorial_03_generative_retrieval.ipynb) |
+| Ranking (LightGBM LambdaMART, with the injection bug) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/juanmigutierrez/generative-recommendation-engine/blob/main/notebooks/tutorial_04_ranking.ipynb) |
+| Evaluation: time split vs leave-one-out, SASRec | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/juanmigutierrez/generative-recommendation-engine/blob/main/notebooks/tutorial_05_evaluation.ipynb) |
+
+The notebooks download pre-computed artifacts from the [v1.0-artifacts release](https://github.com/juanmigutierrez/generative-recommendation-engine/releases/tag/v1.0-artifacts); see .
