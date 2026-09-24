@@ -12,3 +12,7 @@ frontend/build/
 .env
 .DS_Store
 .tmp.driveupload/
+.tmp.drivedownload/
+
+# artifacts bundle for the GitHub release (212 MB, uploaded with create_release.py / gh)
+release/

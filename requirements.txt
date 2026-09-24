@@ -12,6 +12,7 @@ pyarrow
 implicit           # fast ALS/BPR collaborative filtering baseline
 jax                # RQ-VAE (Step 5) -- see docs/05_semantic_ids.md for why JAX, not torch
 jaxlib
+ipywidgets         # interactive tutorial notebooks
 
 # Eval / utils
 tqdm
@@ -21,3 +22,4 @@ matplotlib
 fastapi
 uvicorn[standard]
 pydantic
+lightgbm           # LambdaMART reranker (Step 7)

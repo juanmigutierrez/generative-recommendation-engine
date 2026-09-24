@@ -25,6 +25,15 @@ NOTEBOOK_FILES = {
 }
 
 
+IMG_BASE = "https://raw.githubusercontent.com/juanmigutierrez/generative-recommendation-engine/main/blog/Images/"
+
+
+def img(name, caption=""):
+    """Markdown for one of the explanatory figures from the post (served from the repo)."""
+    cap = f"\n\n*{caption}*" if caption else ""
+    return f"![{caption or name}]({IMG_BASE}{name}){cap}"
+
+
 def badge(n):
     f = NOTEBOOK_FILES[n]
     url = f"https://colab.research.google.com/github/juanmigutierrez/generative-recommendation-engine/blob/main/notebooks/{f}"
@@ -130,6 +139,7 @@ def show_history(user_id):
     display(out.reset_index(drop=True))
 
 interact(show_history, user_id=widgets.Dropdown(options=sample_users, description="user"));'''),
+    ("markdown", "### How one user is scored\n\n" + img("ranking_models.png", "The exam every model takes: history before the cutoff → top-K guesses → what actually happened → Recall@K and NDCG@K.")),
     ("markdown", """## 2. Splitting by time, not at random
 
 A random split lets a model train on a 2022 review and be tested on one from 2005 — it has seen the future. So the cut is by date: the last 8% of the dataset's time span is test, the 8% before that is val, everything earlier is train. The price is that val/test contain users the model has never seen (cold users) and items that did not exist yet (cold items). This is the honest production question — and, as the post explains, a *much* harder one than the papers' leave-one-out protocol (Tutorial 5)."""),
@@ -145,8 +155,18 @@ for name, df in [("val", val), ("test", test)]:
     ("markdown", """## 3. The metrics, on toy lists
 
 Both metrics take a ranked list and the set of items the user actually interacted with next.
-Recall@K asks *did we find it?*; NDCG@K asks *how early?* Edit the two lists below and re-run — the
-functions are the project's own (`backend/models/metrics.py`)."""),
+
+**Recall@K — did we find it?** Of the items the user actually interacted with, what fraction appear anywhere in the top-K list? Order inside the list doesn't matter.
+
+$$\\mathrm{Recall@}K = \\frac{|\\, \\mathrm{top}K \\cap \\mathrm{relevant} \\,|}{|\\, \\mathrm{relevant} \\,|}$$
+
+**NDCG@K — did we find it early?** Each hit gets a weight that shrinks with its position, and the total is divided by the best score possible so the result lands in [0, 1]:
+
+$$\\mathrm{DCG@}K = \\sum_{i=1}^{K} \\frac{\\mathbb{1}[\\text{item}_i \\in \\mathrm{relevant}]}{\\log_2(i+1)}, \\qquad \\mathrm{NDCG@}K = \\frac{\\mathrm{DCG@}K}{\\mathrm{IDCG@}K}$$
+
+""" + img("eval_example_recall.png", "Recall@5 on three lists: only presence counts.") + "\n\n" + img("eval_example_ndcg.png", "NDCG@5: same hit, different position, different score.") + """
+
+Edit the two lists below and re-run — the functions are the project's own (`backend/models/metrics.py`)."""),
     ("code", '''from models.metrics import recall_at_k, ndcg_at_k
 
 relevant = {"E", "M"}                              #@param {type:"raw"}
@@ -161,7 +181,11 @@ def ndcg_vs_position(hit_position):
     print(f"one relevant item at position {hit_position}:  recall@10 = {recall_at_k(ranked, {'E'}, 10):.2f}   ndcg@10 = {ndcg_at_k(ranked, {'E'}, 10):.2f}")'''),
     ("markdown", """## 4. Baseline 1 — popularity
 
-Count how often each item appears in train, sort, cross off what the user already has, return the top-K. Everyone gets the same list."""),
+Count how often each item appears in train, sort, cross off what the user already has, return the top-K. Everyone gets the same list.
+
+$$\\mathrm{pop}(i) = \\sum_{u} \\mathbb{1}\\big[(u, i) \\in \\mathcal{D}\\big], \\qquad \\mathrm{rec}(u) = \\operatorname{top\\text{-}K}_{\\,i \\notin H_u} \\; \\mathrm{pop}(i)$$
+
+""" + img("popularity_model_histogram_indigo.png", "Count → sort → remove what the user already has → return the top-K. The only personalisation is the crossing-off.")),
     ("code", '''from models.popularity import PopularityRecommender
 pop = PopularityRecommender().fit(train)
 print("the ten most popular items in train:")
@@ -169,7 +193,25 @@ for i in pop.ranked_items[:10]:
     print(f"  {title[i][:90]}")'''),
     ("markdown", """## 5. Baseline 2 — ALS
 
-Implicit-feedback matrix factorisation (Hu, Koren & Volinsky 2008) through the `implicit` library: each user and each item gets a 64-dim vector, and the score is their dot product. Takes ~30 s."""),
+Put users in rows and items in columns; a 1 where we saw an interaction, a blank where we didn't. Call it $R$. Recommending is filling in the blanks. ALS says $R$ is (approximately) the product of two thin matrices — a row $\\mathbf{x}_u$ per user and a row $\\mathbf{y}_i$ per item, both of length $k$ — and the prediction for any cell is their dot product:
+
+$$\\hat r_{ui} = \\mathbf{x}_u^{\\top} \\mathbf{y}_i$$
+
+""" + img("als_matrices_R_X_Y.png", "R ≈ X · Yᵀ. The dashed cell (user 1, item 2) was never observed; the model predicts 0.45 for it.") + """
+
+The numbers are chosen to make the predictions match the cells we know, with a penalty on their size so the model can't overfit by making them huge (regularisation, $\\lambda$). And because a blank means *not observed*, not *disliked*, each cell gets a confidence weight — trust the 1s a lot, the blanks only a little (Hu, Koren & Volinsky 2008):
+
+$$c_{ui} = 1 + \\alpha\\, r_{ui}, \\qquad p_{ui} = \\mathbb{1}[r_{ui} > 0]$$
+
+$$\\min_{X,Y} \\sum_{u,i} c_{ui}\\,\\big(p_{ui} - \\mathbf{x}_u^{\\top}\\mathbf{y}_i\\big)^2 + \\lambda\\Big(\\sum_u \\|\\mathbf{x}_u\\|^2 + \\sum_i \\|\\mathbf{y}_i\\|^2\\Big)$$
+
+Solving for $X$ and $Y$ together is hard, so freeze one and the other has a closed-form least-squares solution; alternate until it stops improving — hence the name:
+
+$$\\mathbf{x}_u = (Y^{\\top} C^u Y + \\lambda I)^{-1} Y^{\\top} C^u \\mathbf{p}_u, \\qquad \\mathbf{y}_i = (X^{\\top} C^i X + \\lambda I)^{-1} X^{\\top} C^i \\mathbf{p}_i$$
+
+""" + img("als_full_breakdown_diagram.png", "The three terms of the loss on the toy matrix: confidence, error, regularisation.") + """
+
+The `implicit` library implements exactly this. 64 factors, $\\alpha = 40$, 15 alternations — about 30 s."""),
     ("code", '''from models.als import ALSRecommender
 import time
 n_items = len(items); n_users_total = int(allrows.user_id.max()) + 1
@@ -239,7 +281,10 @@ Companion to the *Semantic IDs* section. Here you will:
 A GPU runtime is recommended (Runtime → Change runtime type → T4)."""),
     ("code", setup_cell(["item_catalog.parquet", "item_embeddings.npy", "item_embeddings_index.parquet",
                          "semantic_ids.parquet"])),
+    ("markdown", img("genai_recommender.png", "The whole idea: each item is converted to a short sequence of discrete tokens (its Semantic ID); a generative model writes the next one; a lookup turns it back into an item.")),
     ("markdown", """## 1. Step 1 of the post: the title becomes 768 numbers
+
+$$\\mathbf{x} = \\text{SentenceT5}(\\text{title}) \\in \\mathbb{R}^{768}$$
 
 The project embedded all 25,612 titles with `sentence-t5-base` (see `backend/scripts/build_item_embeddings_local.py`). The matrix is downloaded above; the optional cell after it re-embeds a few titles live so you can check the two agree."""),
     ("code", '''items = pd.read_parquet(f"{P}/item_catalog.parquet").set_index("item_id")
@@ -282,7 +327,28 @@ unit_std = emb_std / np.linalg.norm(emb_std, axis=1, keepdims=True)
 print(f"cosine similarity of RANDOM item pairs, after standardising:   {np.mean(np.sum(unit_std[a]*unit_std[b], axis=1)):.3f}")'''),
     ("markdown", """## 3. Steps 2–4: train the RQ-VAE
 
-Encoder 768 → 256 → 32, three codebooks of 256 vectors applied to successive residuals, decoder back to 768, and the VQ-VAE loss with the straight-through estimator (`backend/models/rqvae.py`). The post's run used 400 epochs; 150 is enough to see the behaviour. On a T4 this is about a minute."""),
+**Step 2: compress it.** A small encoder $E$ squeezes 768 numbers down to 32:
+
+$$\\mathbf{z} = E(\\mathbf{x}), \\qquad \\mathbf{x} \\in \\mathbb{R}^{768}, \\; \\mathbf{z} \\in \\mathbb{R}^{32}$$
+
+**Step 3: snap it to a codebook.** Instead of keeping $\\mathbf{z}$ as 32 free numbers, snap it to the nearest of 256 learned reference vectors $C_1$; the first digit is the index of that vector. One snap is coarse, so take what's left over (the residual) and snap *that* to a second codebook, then a third:
+
+$$c_1 = \\arg\\min_k \\|\\mathbf{z} - C_1[k]\\|^2, \\qquad \\mathbf{r}_1 = \\mathbf{z} - C_1[c_1]$$
+$$c_2 = \\arg\\min_k \\|\\mathbf{r}_1 - C_2[k]\\|^2, \\qquad \\mathbf{r}_2 = \\mathbf{r}_1 - C_2[c_2], \\qquad c_3 = \\arg\\min_k \\|\\mathbf{r}_2 - C_3[k]\\|^2$$
+
+The Semantic ID is $(c_1, c_2, c_3)$ — coarse, finer, finest — and the compressed vector is rebuilt by adding the three snapped vectors back together:
+
+$$\\hat{\\mathbf{z}} = C_1[c_1] + C_2[c_2] + C_3[c_3]$$
+
+Three codebooks of 256 give $256^3 \\approx 16.7$ million possible IDs from only 768 learned vectors.
+
+**Step 4: train it.** A decoder $D$ tries to rebuild the original 768 numbers from $\\hat{\\mathbf{z}}$. The loss makes that rebuild accurate while pulling the codebook vectors toward the data and the encoder toward the codebooks; $\\mathrm{sg}[\\cdot]$ is *stop-gradient* — the middle term moves only the codebooks, the last one only the encoder:
+
+$$L = \\|\\mathbf{x} - D(\\hat{\\mathbf{z}})\\|^2 + \\|\\mathrm{sg}[\\mathbf{z}] - \\hat{\\mathbf{z}}\\|^2 + \\beta\\,\\|\\mathbf{z} - \\mathrm{sg}[\\hat{\\mathbf{z}}]\\|^2, \\qquad \\beta = 0.25$$
+
+""" + img("RQ_VAE.png", "RQ-VAE: encode, quantise level by level on the residual, decode.") + """
+
+That is what `backend/models/rqvae.py` implements: encoder 768 → 256 → 32, three codebooks of 256, decoder back to 768, straight-through estimator. The post's run used 400 epochs; 150 is enough to see the behaviour. On a T4 this is about a minute."""),
     ("code", '''import jax, jax.numpy as jnp, time
 from models import rqvae
 EPOCHS = 4 if QUICK else 150   #@param {type:"integer"}
@@ -360,9 +426,16 @@ Use a GPU runtime. The project's own JAX code is used throughout (`backend/model
     ("code", setup_cell(["item_catalog.parquet", "item_tokens.parquet", "loo_train_sequences.parquet",
                          "loo_val_targets.parquet", "transformer_train_sequences_loo.npz",
                          "transformer_vocab_meta_loo.json", "transformer_checkpoint_loo.pkl"])),
+    ("markdown", img("generative_retrieval.png", "Items → Semantic IDs → a Transformer that generates the next ID → lookup back to an item.")),
     ("markdown", """## 1. Step 1: the history becomes a sentence
 
-Each item is its 4-digit Semantic ID (three levels + tie-break), offset into one shared vocabulary; a hashed user token goes in front. This is the leave-one-out training data (`build_semantic_sequences.py --loo`): the last two items of every user are held out for evaluation."""),
+Take a user's purchases in time order and replace each item by its four digits (three Semantic ID levels plus the tie-break digit), plus one token at the front that identifies the user:
+
+$$(i_1, i_2, \\ldots, i_T) \\longrightarrow \\big(u,\\; c^{(1)}_1, c^{(1)}_2, c^{(1)}_3, c^{(1)}_4,\\; c^{(2)}_1, \\ldots, c^{(T)}_4\\big)$$
+
+Nothing in that stream says "product" or "user". It's just tokens, and tokens are what language models eat. This is the leave-one-out training data (`build_semantic_sequences.py --loo`): the last two items of every user are held out for evaluation.
+
+""" + img("step5_step6_flow.png", "Step 5 builds the dictionary (Semantic IDs); Step 6 writes sentences in it.")),
     ("code", '''import json, pickle, jax, jax.numpy as jnp, time
 from models import transformer as tx
 import evaluate_retrieval as ev
@@ -390,6 +463,12 @@ def show_stream(user_id):
 
 interact(show_stream, user_id=widgets.Dropdown(options=demo_users, description="user"));'''),
     ("markdown", """## 2. Step 2: train it — or load it
+
+A decoder-only Transformer reads the stream and, at every position, predicts the next token from everything before it. Training maximises the probability of the token that actually came next — i.e. minimises cross-entropy:
+
+$$\\min_{\\theta} \\; -\\sum_{n} \\log P_{\\theta}(t_{n+1} \\mid t_1, \\ldots, t_n)$$
+
+That's the whole objective. No "similarity", no user–item matrix: the model learns which digits tend to follow which.
 
 **Option A** trains a small model on a subset of users right here (a few minutes on a T4; the loss will still be high). **Option B** loads the checkpoint from the post (4 layers, d=128, 45 epochs on the full data). The rest of the notebook works with whichever you ran last."""),
     ("code", '''#@title Option A — train a small model on a subset (GPU: ~3 min)
@@ -424,6 +503,14 @@ if LOAD_CHECKPOINT:
     plt.show()
 print("active model:", model_name)'''),
     ("markdown", """## 3. Steps 3–4: generate, constrained to real items
+
+At inference, feed the history and let the model write four more tokens. The probability of a full item is the product of its four digit probabilities, each conditioned on the digits written so far:
+
+$$P(i \\mid h) = P(c_1 \\mid h)\\; P(c_2 \\mid h, c_1)\\; P(c_3 \\mid h, c_1, c_2)\\; P(c_4 \\mid h, c_1, c_2, c_3)$$
+
+The first digit picks the broad family, the second narrows it, the third pins the item down, the fourth breaks ties. Not every 4-digit combination is a product, so generation is constrained to digits that lead to a real item, and beam search keeps the best partial IDs alive instead of greedily taking one digit at a time. The score of a finished candidate is its log-probability; the top-K by score (minus what the user already has) are the recommendations:
+
+$$\\mathrm{score}(i) = \\sum_{j=1}^{4} \\log P(c_j \\mid h, c_{<j}), \\qquad \\mathrm{rec}(u) = \\operatorname{top\\text{-}K}_{\\,i \\in \\text{catalog},\\, i \\notin H_u} \\mathrm{score}(i)$$
 
 The trie below is built from every catalog item's 4 digits. At each step the model only scores digits that can still complete a real item. Pick a user: you see the *families* the first digit points at, then the finished top-10 with the true next item marked."""),
     ("code", '''trie = ev.build_trie(item_tokens); ev.N_HEADS = model_heads; ev.BEAM_WIDTH = 30
@@ -493,7 +580,7 @@ Companion to the *Ranking* section. Here you will:
 CPU is fine for this one (~3 min)."""),
     ("code", setup_cell(["train.parquet", "item_catalog.parquet", "train_sequences.parquet",
                          "val_targets.parquet", "item_embeddings.npy"])),
-    ("markdown", "## 1. Retrieval gives 100 candidates per user\n\nALS is the retrieval stage here (the same reasoning as in the project: it scores the whole catalog in one matrix multiply)."),
+    ("markdown", img("re-ranking-modeling.png", "Retrieve wide and cheap, then re-rank a small set of candidates with richer signals.") + "\n\n## 1. Retrieval gives 100 candidates per user\n\nALS is the retrieval stage here (the same reasoning as in the project: it scores the whole catalog in one matrix multiply)."),
     ("code", '''import time, lightgbm as lgb
 from models.als import ALSRecommender
 from models.ranking_features import FEATURE_COLUMNS, build_item_features, build_user_profile_embeddings, build_user_interaction_counts, assemble_features
@@ -517,6 +604,10 @@ print(f"{N_TRAIN:,} ranker-training users, {N_EVAL:,} held-out users; 100 ALS ca
     ("markdown", """## 2. Build the feature table — with and without the bug
 
 Seven features per (user, candidate): ALS score, log popularity, price (+ has_price flag), recency, content similarity to the user's profile embedding, log history length. The label is 1 if the candidate is one of the user's val items.
+
+The model is a gradient-boosted tree ensemble (LightGBM) that maps those seven numbers to a score, $s_{ui} = f(\\phi_{ui})$, $\\phi_{ui} \\in \\mathbb{R}^7$. What makes it a *ranker* rather than a classifier is the objective: LambdaMART looks at pairs. For every pair where item $i$ was the true next purchase and item $j$ was not, it pushes $s_{ui}$ above $s_{uj}$, and pushes harder when swapping the two would change NDCG more:
+
+$$L = \\sum_{u} \\sum_{i \\succ j} |\\Delta\\mathrm{NDCG}_{ij}| \\cdot \\log\\big(1 + e^{-(s_{ui} - s_{uj})}\\big), \\qquad \\mathrm{rec}(u) = \\operatorname{sort}_{\\,i \\in \\mathrm{candidates}(u)} s_{ui}$$
 
 **The bug:** ALS's top-100 contains the true item for only ~13% of users. The first version "fixed" that by *injecting* the missing true items with a placeholder ALS score (the list minimum). Toggle it below."""),
     ("code", '''def build_table(users, inject):
@@ -602,6 +693,7 @@ Use a GPU runtime; beam search is the slow part."""),
                          "loo_train_sequences.parquet", "loo_val_sequences.parquet", "loo_val_targets.parquet",
                          "loo_test_targets.parquet", "transformer_vocab_meta_loo.json", "transformer_checkpoint_loo.pkl",
                          "sasrec_checkpoint.pkl", "train.parquet", "val_targets.parquet", "loo_evaluation_results.json"])),
+    ("markdown", img("eval_flow_example.png", "Leave-one-out: hide the last item, rank, score with Recall@K and NDCG@K.")),
     ("markdown", """## 1. One user, two questions
 
 The time split asks: given everything before Nov 2019, what will this user review in 2021–2023? Leave-one-out asks: given everything but the last item, what is the last item? Same person, very different problems."""),
@@ -694,6 +786,7 @@ ax.bar(names, vals, color="#2a78d6", width=0.55); [ax.text(i, v + max(vals) * 0.
 ax.set_ylabel("recall@10"); ax.set_title(f"leave-one-out {SPLIT}, {len(users):,} users", loc="left"); [ax.spines[s].set_visible(False) for s in ["top", "right"]]
 plt.show()
 print("Under the papers' protocol the generative model is ~3x popularity and in TIGER's published range — but SASRec, the ID-based Transformer with the same backbone, is still ahead on this dataset. The post's closing section lists the suspects.")'''),
+    ("markdown", img("recall_two_protocols.png", "The post's one-figure summary: the same models under both protocols.")),
     ("markdown", "That is the end of the tutorial series. The full pipeline scripts, docs for each step and the audit that led to the second protocol are in the [repository](https://github.com/juanmigutierrez/generative-recommendation-engine)."),
     ]
     return nb(cells, "Tutorial 5 — evaluation")
